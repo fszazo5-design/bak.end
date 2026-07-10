@@ -3,38 +3,90 @@ import cors from 'cors';
 import { MongoClient } from 'mongodb';
 
 const app = express();
-app.use(cors());
+
+// 🌐 إعدادات الـ CORS للسماح لتطبيق الديسكتوب بالاتصال بالسيرفر دون قيود
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type']
+}));
+
 app.use(express.json());
 
+// 🔌 سحب رابط الـ MongoDB السري من متغيرات البيئة الآمنة
 const MONGODB_URI = process.env.MONGODB_URI;
 
+let dbClient = null;
+
+// دالة الاتصال بقاعدة البيانات وضمان عدم تكرار فتح الاتصال
 async function getCompaniesCollection() {
-  if (!MONGODB_URI) throw new Error("MONGODB_URI missing!");
-  const client = new MongoClient(MONGODB_URI);
-  await client.connect();
-  return client.db().collection('companies');
+  if (!MONGODB_URI) {
+    throw new Error("⚠️ خطأ: متغير البيئة MONGODB_URI مفقود في إعدادات السيرفر!");
+  }
+  
+  if (!dbClient) {
+    dbClient = new MongoClient(MONGODB_URI);
+    await dbClient.connect();
+    console.log("🔌 تم الاتصال بنجاح بسحابة MongoDB Atlas");
+  }
+  
+  // يقوم تلقائياً باستهداف اسم قاعدة البيانات الموجودة في الرابط والـ collection المطلوب
+  return dbClient.db().collection('companies');
 }
 
-// 1. رابط جلب البيانات (GET)
+// -------------------------------------------------------------------
+// 🎯 المسار الأول: جلب واستعراض الشركات (GET)
+// الرابط: /api/companies
+// -------------------------------------------------------------------
 app.get('/api/companies', async (req, res) => {
   try {
     const collection = await getCompaniesCollection();
     const companies = await collection.find({}).sort({ id: 1 }).toArray();
-    res.status(200).json({ status: "success", count: companies.length, companies });
+
+    return res.status(200).json({
+      status: "success",
+      message: "تم جلب البيانات بنجاح من الباك اند سحابة MongoDB",
+      count: companies.length,
+      companies: companies,
+      code: 200
+    });
   } catch (err) {
-    res.status(500).json({ status: "error", message: err.message });
+    console.error('Fetch error:', err);
+    return res.status(500).json({ 
+      status: "error",
+      message: "حدث خطأ داخل السيرفر أثناء جلب البيانات",
+      error_details: err.message,
+      code: 500
+    });
   }
 });
 
-// 2. رابط حفظ ومزامنة البيانات (POST)
+// -------------------------------------------------------------------
+// 🎯 المسار الثاني: المزامنة وحفظ البيانات القادمة من الديسكتوب (POST)
+// الرابط: /api/sync
+// -------------------------------------------------------------------
 app.post('/api/sync', async (req, res) => {
   try {
     const { companies } = req.body || {};
-    if (!Array.isArray(companies)) return res.status(400).json({ error: 'companies must be an array' });
-    
-    const collection = await getCompaniesCollection();
-    if (companies.length === 0) return res.status(200).json({ ok: true, message: 'No companies to sync' });
 
+    if (!Array.isArray(companies)) {
+      return res.status(400).json({ 
+        status: "error", 
+        message: "يجب أن تكون البيانات المرسلة عبارة عن مصفوفة (Array)" 
+      });
+    }
+
+    const collection = await getCompaniesCollection();
+
+    if (companies.length === 0) {
+      return res.status(200).json({ 
+        ok: true, 
+        upserted: 0, 
+        message: 'لا توجد شركات جديدة للمزامنة' 
+      });
+    }
+
+    // بناء عمليات الحفظ والتحديث الضخمة (Bulk Upsert) بناءً على معرف الشركة المتغير id
     const operations = companies.map((company) => ({
       updateOne: {
         filter: { id: company.id },
@@ -48,19 +100,37 @@ app.post('/api/sync', async (req, res) => {
             website_or_page_link: company.website_or_page_link || '',
             updatedAt: new Date(),
           },
-          $setOnInsert: { createdAt: new Date() },
+          $setOnInsert: {
+            createdAt: new Date(),
+          },
         },
         upsert: true,
       },
     }));
 
     const result = await collection.bulkWrite(operations, { ordered: false });
-    res.status(200).json({ ok: true, upserted: result.upsertedCount, total: companies.length });
+
+    return res.status(200).json({
+      ok: true,
+      status: "success",
+      upserted: result.upsertedCount || 0,
+      modified: result.modifiedCount || 0,
+      total: companies.length,
+      message: "تمت المزامنة وحفظ البيانات السحابية بنجاح"
+    });
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Sync error:', err);
+    return res.status(500).json({ 
+      status: "error", 
+      message: "فشلت عملية المزامنة السحابية", 
+      error_details: err.message 
+    });
   }
 });
 
-// تشغيل السيرفر
+// تشغيل السيرفر المحلي للاختبار
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 السيرفر يعمل الآن بنجاح على المنفذ ${PORT}`);
+});
